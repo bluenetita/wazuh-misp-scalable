@@ -1,4 +1,4 @@
-# Wazuh → MISP Enrichment (Forwarder C + Redis Streams + Worker Python)
+# Wazuh → MISP Scalable Enrichment Pipeline
 
 A fast, scalable enrichment pipeline for Wazuh alerts using MISP.
 
