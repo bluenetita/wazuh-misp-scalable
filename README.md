@@ -5,7 +5,7 @@ A fast, scalable enrichment pipeline for Wazuh alerts using MISP.
 Instead of running a one-shot script per alert (slow startup + HTTP per event), this project uses:
 - a **tiny C forwarder** (runs per alert, does *only* enqueue),
 - **Redis Streams** (buffer + consumer groups),
-- a **persistent Python worker** (extract IoCs, cache/dedupe, query MISP, emit back to Wazuh).
+- a **persistent and multi-threaded Python worker** (extract IoCs, cache/dedupe, query MISP, emit back to Wazuh).
 
 ## What it enriches
 
