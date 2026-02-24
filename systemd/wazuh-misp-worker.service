@@ -1,0 +1,25 @@
+[Unit]
+Description=Wazuh MISP Worker (Redis Streams + TTL cache)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wazuh
+Group=wazuh
+WorkingDirectory=/var/ossec
+EnvironmentFile=/var/ossec/etc/misp_worker.env
+ExecStart=/var/ossec/var/misp_worker/venv/bin/python /var/ossec/integrations/misp_worker.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/ossec/logs /var/ossec/queue /var/ossec/var /var/ossec/tmp
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

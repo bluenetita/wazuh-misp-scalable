@@ -1,0 +1,101 @@
+# Wazuh MISP worker - extractors example
+#
+# Purpose:
+# - Extract ONLY these observable families:
+#   - IP (public/global)
+#   - FQDN
+#   - HASH (md5/sha1/sha256)
+#
+# The worker ships with built-in defaults. This file is optional.
+# You can:
+# - extend defaults (include_defaults: true) by adding more rules/paths
+# - replace defaults entirely (include_defaults: false) to fully control extraction
+
+version: 1
+
+# If true, built-in defaults are loaded first, then these rules are appended.
+# If false, ONLY the rules in this file are used.
+include_defaults: true
+
+# If true, stop after the first matching rule. If false, apply all matching rules.
+stop_on_match: false
+
+rules:
+  # ------------------------------------------------------------
+  # Example 1: add extra generic IP/FQDN fields
+  # ------------------------------------------------------------
+  - name: extra_generic_fields
+    when:
+      groups_any: ["to_misp"]
+    extract:
+      - type: ip
+        path_any:
+          - data.network.src_ip
+          - data.network.dst_ip
+          - data.src.ip
+          - data.dst.ip
+      - type: fqdn
+        path_any:
+          - data.dns.query
+          - data.http.host
+
+  # ------------------------------------------------------------
+  # Example 2: Sysmon Event ID 3 (Network) alternative paths
+  # ------------------------------------------------------------
+  - name: sysmon_event3_alt
+    when:
+      groups_any: ["to_misp"]
+      decoder: "windows_eventchannel"
+      provider: "Microsoft-Windows-Sysmon"
+      event_id: "3"
+    extract:
+      - type: fqdn
+        path_any:
+          - data.win.eventdata.DestinationHostname
+          - data.win.eventdata.DestinationHostName  # (example typo variant)
+
+  # ------------------------------------------------------------
+  # Example 3: Hashes from a custom string field
+  # ------------------------------------------------------------
+  - name: custom_hash_blob
+    when:
+      groups_any: ["to_misp"]
+    extract:
+      # type: hash means "auto-detect md5/sha1/sha256 from string"
+      # modes:
+      # - sysmon_kv: expects "MD5=...,SHA1=...,SHA256=..."
+      # - auto: scans for 32/40/64 hex tokens inside the string
+      - type: hash
+        path: data.hash_blob
+        mode: auto
+
+  # ------------------------------------------------------------
+  # Example 4: FIM/syscheck additional paths
+  # ------------------------------------------------------------
+  - name: fim_extra
+    when:
+      groups_any: ["to_misp", "syscheck"]
+    extract:
+      - type: sha256
+        path_any:
+          - syscheck.sha256_after
+          - syscheck.sha256_before
+          - data.syscheck.sha256_after
+      - type: md5
+        path_any:
+          - syscheck.md5_after
+          - syscheck.md5_before
+
+  # ------------------------------------------------------------
+  # Example 5: Force only one rule to apply (if you set stop_on_match: true)
+  # ------------------------------------------------------------
+  - name: high_priority_rule_example
+    when:
+      groups_any: ["to_misp"]
+      decoder: "my_decoder_name"
+    extract:
+      - type: ip
+        path: data.srcip
+      - type: fqdn
+        path: data.fqdn
+		
