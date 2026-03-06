@@ -5,7 +5,7 @@ This project adds fast, scalable MISP enrichment to Wazuh without running one-sh
 ## Components
 
 ### 1) Wazuh integration (trigger)
-Wazuh `integratord` runs a custom integration for alerts whose rule group includes `to_misp`. At the time of writing, this Wazuh component is single threaded, it means that custom integrations need to be VERY FAST to scale in high EPS environments.
+Wazuh `integratord` runs custom integrations. At the time of writing, this Wazuh component is single threaded, it means that custom integrations need to be VERY FAST to scale in high EPS environments.
 
 ### 2) Forwarder (C)
 The forwarder is intentionally “dumb and fast”:
@@ -39,7 +39,7 @@ The worker:
 
 ## Data flow
 
-Wazuh alert (to_misp)
+Wazuh alert
   └─> forwarder (C)
        └─> Redis Stream: wazuh:misp:in (field alert="<json>")
             └─> worker (Python)
@@ -55,11 +55,6 @@ Wazuh alert (to_misp)
   - dedupe TTL (short)
   - cache TTL (hit/miss)
 
-## What "to_misp" means
-
-`to_misp` is a routing flag only:
-- it means “send this alert into the enrichment pipeline”
-- it does **not** imply the alert contains a specific field such as `data.srcip`
 
 ## Config-driven extraction
 
