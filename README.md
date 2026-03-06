@@ -1,4 +1,4 @@
-# Wazuh → MISP Enrichment
+# Wazuh → MISP Enrichment (Forwarder C + Redis Streams + Worker Python)
 
 A fast, scalable enrichment pipeline for Wazuh alerts using MISP.
 
@@ -79,12 +79,11 @@ Optional: extend extraction paths (defaults are already built-in):
 sudo cp config/misp_extractors.yml.example /var/ossec/etc/misp_extractors.yml
 ```
 
-### 5) Tell Wazuh to call the forwarder for `to_misp`
+### 5) Tell Wazuh to call the forwarder
 In `/var/ossec/etc/ossec.conf`:
 ```xml
 <integration>
   <name>custom-misp-forwarder</name>
-  <group>to_misp</group>
   <alert_format>json</alert_format>
 </integration>
 ```
