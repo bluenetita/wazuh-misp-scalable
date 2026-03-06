@@ -19,7 +19,7 @@ That narrow scope keeps extraction robust and performance predictable.
 ## Architecture (high level)
 
 ```
-Wazuh alert (group: to_misp)
+Wazuh alert
   └─> forwarder (C)
        └─> Redis Stream (field: alert="<raw Wazuh JSON>")
             └─> worker (Python, persistent)
