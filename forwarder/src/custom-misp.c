@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
-#  ____  _            _   _      _                      _        
-# |  _ \| |          | \ | |    | |                    | |       
-# | |_) | |_   _  ___|  \| | ___| |___      _____  _ __| | _____ 
-# |  _ <| | | | |/ _ \ . ` |/ _ \ __\ \ /\ / / _ \| '__| |/ / __|
-# | |_) | | |_| |  __/ |\  |  __/ |_ \ V  V / (_) | |  |   <\__ \
-# |____/|_|\__,_|\___|_| \_|\___|\__| \_/\_/ \___/|_|  |_|\_\___/
-#                                                                
-# -= Scalable MISP Integration :: Wazuh Forwarder =- 
-# Github @bluenetita
-# Version: 1.0
-# License: AGPL v3.0 https://www.gnu.org/licenses/agpl-3.0.html
+//  ____  _            _   _      _                      _        
+// |  _ \| |          | \ | |    | |                    | |       
+// | |_) | |_   _  ___|  \| | ___| |___      _____  _ __| | _____ 
+// |  _ <| | | | |/ _ \ . ` |/ _ \ __\ \ /\ / / _ \| '__| |/ / __|
+// | |_) | | |_| |  __/ |\  |  __/ |_ \ V  V / (_) | |  |   <\__ \
+// |____/|_|\__,_|\___|_| \_|\___|\__| \_/\_/ \___/|_|  |_|\_\___/
+//                                                                
+// -= Scalable MISP Integration :: Wazuh Forwarder =- 
+// Github @bluenetita
+// Version: 1.0
+// License: AGPL v3.0 https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <stdio.h>
 #include <stdlib.h>

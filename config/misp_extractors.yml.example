@@ -1,15 +1,14 @@
-# Wazuh MISP worker - extractors example
+# Wazuh to MISP worker extractors (example)
 #
-# Purpose:
-# - Extract ONLY these observable families:
+# Goal: extract ONLY these observable families:
 #   - IP (public/global)
 #   - FQDN
 #   - HASH (md5/sha1/sha256)
 #
-# The worker ships with built-in defaults. This file is optional.
-# You can:
-# - extend defaults (include_defaults: true) by adding more rules/paths
-# - replace defaults entirely (include_defaults: false) to fully control extraction
+# IMPORTANT (updated):
+# - The worker no longer requires alerts to carry the "to_misp" group.
+# - Therefore, rules in this file should NOT rely on groups_any: ["to_misp"].
+# - Use "when" only to *narrow* matching (optional), e.g. sysmon provider/event_id or syscheck group.
 
 version: 1
 
@@ -22,11 +21,10 @@ stop_on_match: false
 
 rules:
   # ------------------------------------------------------------
-  # Example 1: add extra generic IP/FQDN fields
+  # Example 1: Add extra generic IP/FQDN fields (applies to any alert)
   # ------------------------------------------------------------
   - name: extra_generic_fields
-    when:
-      groups_any: ["to_misp"]
+    when: {}
     extract:
       - type: ip
         path_any:
@@ -34,17 +32,20 @@ rules:
           - data.network.dst_ip
           - data.src.ip
           - data.dst.ip
+          - data.client.ip
+          - data.server.ip
       - type: fqdn
         path_any:
           - data.dns.query
           - data.http.host
+          - data.tls.sni
 
   # ------------------------------------------------------------
   # Example 2: Sysmon Event ID 3 (Network) alternative paths
+  # (narrowed by decoder/provider/event_id)
   # ------------------------------------------------------------
   - name: sysmon_event3_alt
     when:
-      groups_any: ["to_misp"]
       decoder: "windows_eventchannel"
       provider: "Microsoft-Windows-Sysmon"
       event_id: "3"
@@ -52,14 +53,27 @@ rules:
       - type: fqdn
         path_any:
           - data.win.eventdata.DestinationHostname
-          - data.win.eventdata.DestinationHostName  # (example typo variant)
+          - data.win.eventdata.DestinationHostName  # (example variant)
 
   # ------------------------------------------------------------
-  # Example 3: Hashes from a custom string field
+  # Example 3: Sysmon Event ID 22 (DNS) alternative paths
+  # ------------------------------------------------------------
+  - name: sysmon_event22_dns_alt
+    when:
+      decoder: "windows_eventchannel"
+      provider: "Microsoft-Windows-Sysmon"
+      event_id: "22"
+    extract:
+      - type: fqdn
+        path_any:
+          - data.win.eventdata.QueryName
+          - data.win.eventdata.QueryResults  # (example, depends on source)
+
+  # ------------------------------------------------------------
+  # Example 4: Hashes from a custom string field (auto-detect)
   # ------------------------------------------------------------
   - name: custom_hash_blob
-    when:
-      groups_any: ["to_misp"]
+    when: {}
     extract:
       # type: hash means "auto-detect md5/sha1/sha256 from string"
       # modes:
@@ -70,11 +84,12 @@ rules:
         mode: auto
 
   # ------------------------------------------------------------
-  # Example 4: FIM/syscheck additional paths
+  # Example 5: FIM/syscheck additional paths
+  # (narrowed by group "syscheck" to avoid scanning every alert)
   # ------------------------------------------------------------
   - name: fim_extra
     when:
-      groups_any: ["to_misp", "syscheck"]
+      groups_any: ["syscheck"]
     extract:
       - type: sha256
         path_any:
@@ -87,15 +102,18 @@ rules:
           - syscheck.md5_before
 
   # ------------------------------------------------------------
-  # Example 5: Force only one rule to apply (if you set stop_on_match: true)
+  # Example 6: Optional targeting by groups (NOT required)
+  # Use this only if you want to limit extraction on specific alert families.
   # ------------------------------------------------------------
-  - name: high_priority_rule_example
+  - name: only_web_and_auth
     when:
-      groups_any: ["to_misp"]
-      decoder: "my_decoder_name"
+      groups_any: ["web", "web_scan", "sshd", "authentication_failed"]
     extract:
       - type: ip
-        path: data.srcip
+        path_any:
+          - data.srcip
+          - data.dstip
       - type: fqdn
-        path: data.fqdn
-		
+        path_any:
+          - data.url_domain
+          - data.http.host
