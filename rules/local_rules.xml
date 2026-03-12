@@ -1,24 +1,31 @@
-<group name="misp,">
+<!-- Local rules -->
 
-  <rule id="200110" level="10">
+<group name="misp,">
+ 
+  <!-- Base rule: any event from the MISP integration -->
+  <rule id="100620" level="10">
     <field name="integration">misp</field>
-    <description>MISP integration event detected</description>
+    <description>MISP integration event</description>
     <options>no_full_log</options>
   </rule>
-
-  <rule id="200111" level="5">
-    <if_sid>200620</if_sid>
-    <field name="misp.error">\.+</field>
-    <description>MISP - API connection failure</description>
+ 
+  <!-- MISP API error -->
+  <rule id="100621" level="5">
+    <if_sid>100620</if_sid>
+    <field name="error">\.+</field>
+    <description>MISP - API connection failure: $(error)</description>
     <options>no_full_log</options>
     <group>misp_error,</group>
   </rule>
-
-  <rule id="200112" level="12">
-    <field name="misp.category">\.+</field>
-    <description>MISP - Threat Intelligence match detected | Category: $(misp.category) | Value: $(misp.value)</description>
+ 
+  <!-- MISP threat match: uses flat root-level fields emitted by misp_worker v1.4 -->
+  <rule id="100622" level="12">
+    <if_sid>100620</if_sid>
+    <field name="misp_observable_value">\.+</field>
+    <description>MISP Threat Match | $(misp_observable_type): $(misp_observable_value) | Event #$(misp_event_id) | $(misp_category) | Source: $(misp_source_rule)</description>
     <options>no_full_log</options>
-    <group>misp_alert,</group>
+    <group>misp_alert,threat_intel,</group>
   </rule>
-
+ 
 </group>
+ 
