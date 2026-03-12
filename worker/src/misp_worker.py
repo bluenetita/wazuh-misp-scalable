@@ -9,7 +9,7 @@
 #
 # -= Scalable MISP Integration :: Wazuh Worker =-
 # Github @bluenetita
-# Version: 1.3
+# Version: 1.4
 # License: AGPL v3.0 https://www.gnu.org/licenses/agpl-3.0.html
 #
 # Fixes vs 1.0:
@@ -56,6 +56,25 @@
 #   [FEAT-4] Graceful HTTP session cleanup on shutdown.
 #            Worker threads call session.close() when their loop exits so TCP
 #            connections to MISP are properly torn down instead of being left half-open.
+#
+# Changes vs 1.3:
+#   [FEAT-5] Flat summary fields added to the Wazuh event payload.
+#            Wazuh's $(field) interpolation in rule <description> tags only resolves
+#            root-level decoded fields. The nested matched[]/misp[] array structure
+#            was causing description fields to render blank in alerts.
+#            send_wazuh_event() now emits flat root-level keys alongside the existing
+#            nested structure (which is preserved for OpenSearch/dashboards):
+#              misp_observable_value  -- IOC value of the first match
+#              misp_observable_type   -- observable type (ip, fqdn, md5, ...)
+#              misp_event_id          -- MISP event ID of the first attribute hit
+#              misp_category          -- MISP attribute category of the first hit
+#              misp_ioc_type          -- MISP attribute type of the first hit
+#              misp_source_rule       -- description of the Wazuh rule that triggered
+#              misp_match_count       -- total number of matched observables
+#            Wazuh rules can now use e.g.:
+#              <description>MISP Hit | $(misp_observable_type): $(misp_observable_value)
+#                           | Event #$(misp_event_id) | $(misp_category)
+#                           | Source: $(misp_source_rule)</description>
 
 
 import copy
@@ -658,6 +677,7 @@ def slim_attrs(attrs: List[Dict[str, Any]], max_n: int) -> List[Dict[str, Any]]:
 def send_wazuh_event(payload: Dict[str, Any], agent: Optional[Dict[str, Any]]) -> None:
     try:
         msg      = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        logger.debug("send_wazuh_event payload=%s", msg)
         agent_id = str(agent.get("id") or "000") if agent else "000"
         if not agent or agent_id in ("", "000", "None"):
             line = f"1:misp:{msg}"
@@ -927,8 +947,20 @@ def process_message(
                     circuit_breaker.state)
 
     if matched:
+        first = matched[0]
         send_wazuh_event({
-            "integration": "misp",
+            "integration":           "misp",
+            # [FEAT-5] Flat root-level fields for Wazuh rule $(field) interpolation.
+            # Nested fields (matched[], source{}) are NOT resolvable in <description>
+            # tags -- only top-level decoded keys work reliably.
+            "misp_observable_value": first["observable"]["value"],
+            "misp_observable_type":  first["observable"]["type"],
+            "misp_event_id":         str(first["misp"][0].get("event_id", "")),
+            "misp_category":         str(first["misp"][0].get("category", "")),
+            "misp_ioc_type":         str(first["misp"][0].get("type", "")),
+            "misp_source_rule":      rule_desc,
+            "misp_match_count":      str(len(matched)),
+            # Nested structure preserved for OpenSearch dashboards and deep correlation.
             "source": {
                 "rule_id":          deep_get(alert, "rule.id"),
                 "rule_description": rule_desc,
@@ -1112,4 +1144,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
