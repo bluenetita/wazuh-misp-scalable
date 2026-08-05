@@ -63,7 +63,9 @@ If the issue is critical and actively exploitable, we may publish a mitigation a
 ### Availability / backpressure
 - Use Redis Streams for buffering and consumer groups.
 - Tune cache TTLs to reduce MISP traffic.
-- Choose `ACK_ON_MISP_ERROR` behavior that matches your outage strategy.
+- When `DLQ_MAX_RETRIES=0`, choose `ACK_ON_MISP_ERROR` behavior that matches your
+  outage strategy. With DLQ enabled, MISP query failures remain pending until
+  the retry threshold.
 
 ## Scope
 

@@ -19,7 +19,7 @@ The forwarder is intentionally “dumb and fast”:
 Redis Streams provide:
 - backpressure buffer
 - consumer groups (scale-out with multiple workers)
-- pending list + reclaim (XAUTOCLAIM) for crash recovery
+- pending list + cursor-based reclaim (XAUTOCLAIM) for crash recovery
 
 Stream message format (minimal):
 - `alert`: JSON string (the entire Wazuh alert)
@@ -54,6 +54,8 @@ Wazuh alert
 - Duplicate enrichment is controlled by:
   - dedupe TTL (short)
   - cache TTL (hit/miss)
+- A retry of the same stream message can pass its own dedupe key; a separate
+  message for the same observable remains deduplicated.
 
 
 ## Config-driven extraction
@@ -68,9 +70,17 @@ Optionally, you can extend/override extraction with `/var/ossec/etc/misp_extract
 ## Failure behavior
 
 - If Redis is unavailable: forwarder should fail closed (Wazuh continues; enrichment is skipped).
-- If MISP is slow/down:
-  - with `ACK_ON_MISP_ERROR=1`, the worker acks the message and continues (no backlog buildup).
-  - with `ACK_ON_MISP_ERROR=0`, the message remains pending for retry (risk of backlog growth).
+- If a MISP query fails:
+  - with `DLQ_MAX_RETRIES>0`, the message remains pending until the retry threshold;
+  - at the threshold, the worker writes to `DLQ_STREAM` before acknowledging the source;
+  - if the DLQ write fails, the source remains pending;
+  - with `DLQ_MAX_RETRIES=0`, `ACK_ON_MISP_ERROR` controls whether the worker drops
+    or retains the failed message.
+- Missing, invalid, or non-object alert JSON is logged and explicitly acknowledged.
+- Unexpected processing exceptions are logged and left pending.
+- Startup recovery advances the `XAUTOCLAIM` cursor until Redis returns `0-0`.
+- While the circuit is open, the existing outage policy skips MISP and
+  acknowledges the message as unmatched. Half-open state admits one probe at a time.
 
 ## Observability
 

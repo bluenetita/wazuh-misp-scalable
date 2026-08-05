@@ -161,7 +161,7 @@ The integration block above forwards every eligible Wazuh alert. To restrict
 enrichment, add `<group>to_misp</group>` to the block and ensure the source rules
 belong to that group. Worker v1.5 does not impose a second hard-coded group gate.
 
-### Worker v1.5 output
+### Worker v1.5+ output
 Matched observables remain available through flat `misp_*` fields for Wazuh
 rules. Detailed source and match arrays are emitted under `misp_context` so they
 cannot collide with generic OpenSearch mappings such as `data.source`.
