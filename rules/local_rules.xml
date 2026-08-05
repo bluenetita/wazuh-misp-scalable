@@ -18,7 +18,7 @@
     <group>misp_error,</group>
   </rule>
  
-  <!-- MISP threat match: uses flat root-level fields emitted by misp_worker v1.4 -->
+  <!-- MISP threat match: uses flat root-level fields emitted by misp_worker v1.5 -->
   <rule id="100622" level="12">
     <if_sid>100620</if_sid>
     <field name="misp_observable_value">\.+</field>

@@ -9,7 +9,7 @@
 #
 # -= Scalable MISP Integration :: Wazuh Worker =-
 # Github @bluenetita
-# Version: 1.4
+# Version: 1.5
 # License: AGPL v3.0 https://www.gnu.org/licenses/agpl-3.0.html
 #
 # Fixes vs 1.0:
@@ -75,6 +75,13 @@
 #              <description>MISP Hit | $(misp_observable_type): $(misp_observable_value)
 #                           | Event #$(misp_event_id) | $(misp_category)
 #                           | Source: $(misp_source_rule)</description>
+#
+# Changes vs 1.4:
+#   [BUG-8] Nested enrichment fields moved below misp_context. Generic root keys
+#           such as source and matched can already be mapped as keywords in a
+#           Wazuh daily index, causing OpenSearch to reject the whole alert when
+#           the worker later emits objects at those paths.
+#   [FEAT-5] Added Falco fd.sip/fd.cip decoded paths to the built-in IP extractor.
 
 
 import copy
@@ -420,6 +427,7 @@ DEFAULT_EXTRACTORS: Dict[str, Any] = {
                     "data.source.ip", "data.destination.ip",
                     "data.source_ip", "data.destination_ip",
                     "data.client.ip", "data.server.ip",
+                    "data.output_fields.fd.sip", "data.output_fields.fd.cip",
                     "data.win.eventdata.SourceIp", "data.win.eventdata.DestinationIp",
                 ],
             }],
@@ -960,13 +968,15 @@ def process_message(
             "misp_ioc_type":         str(first["misp"][0].get("type", "")),
             "misp_source_rule":      rule_desc,
             "misp_match_count":      str(len(matched)),
-            # Nested structure preserved for OpenSearch dashboards and deep correlation.
-            "source": {
-                "rule_id":          deep_get(alert, "rule.id"),
-                "rule_description": rule_desc,
-                "decoder":          deep_get(alert, "decoder.name"),
+            # Namespace nested data to avoid collisions with generic Wazuh fields.
+            "misp_context": {
+                "source": {
+                    "rule_id":          deep_get(alert, "rule.id"),
+                    "rule_description": rule_desc,
+                    "decoder":          deep_get(alert, "decoder.name"),
+                },
+                "matched": matched,
             },
-            "matched": matched,
         }, agent)
 
     r.xack(STREAM, GROUP, msg_id)
@@ -1144,5 +1154,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
