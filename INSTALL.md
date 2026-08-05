@@ -1,110 +1,163 @@
 # Install
 
-This guide assumes installation on the Wazuh Manager host.
+This guide assumes installation on the Wazuh Manager host. Run repository file
+commands from the repository root.
 
 ## Prerequisites
 
 - Wazuh Manager running
 - Redis available (local recommended)
-- Python 3 available on the manager
-- (For forwarder build) gcc + hiredis dev libs
+- Python 3 with virtual environment support
+- gcc and hiredis development headers
 
 ## 1) Redis
 
-Install and start Redis (examples):
+Install and start Redis.
 
 Debian/Ubuntu:
-- `apt install redis-server redis-tools`
+
+```bash
+sudo apt install redis-server redis-tools gcc libhiredis-dev python3 python3-venv
+sudo systemctl enable --now redis-server
+```
 
 RHEL/Alma/Rocky:
-- `dnf install redis`
+
+```bash
+sudo dnf install redis gcc hiredis-devel python3
+sudo systemctl enable --now redis
+```
 
 Verify:
-- `redis-cli PING` -> `PONG`
+
+```bash
+redis-cli PING
+# PONG
+```
 
 ## 2) Forwarder (C)
 
-Build and install into Wazuh integrations directory:
+Build the actual source file and install it into the Wazuh integrations
+directory:
 
-- Build:
-  - `gcc -O2 -o custom-misp-forwarder custom-misp-forwarder.c -lhiredis`
-
-- Install:
-  - `install -m 0750 custom-misp-forwarder /var/ossec/integrations/custom-misp-forwarder`
+```bash
+gcc -O2 -Wall -Wextra \
+  -o /tmp/custom-misp-forwarder \
+  forwarder/src/custom-misp.c \
+  -lhiredis
+sudo install -o root -g wazuh -m 0750 \
+  /tmp/custom-misp-forwarder \
+  /var/ossec/integrations/custom-misp-forwarder
+```
 
 The forwarder should enqueue raw Wazuh alerts into a Redis Stream (field name: `alert`).
 
 ## 3) Worker (Python) inside /var/ossec
 
-Create virtualenv and install deps:
+Create the virtual environment, install dependencies, and deploy the worker:
 
-- `mkdir -p /var/ossec/var/misp_worker`
-- `python3 -m venv /var/ossec/var/misp_worker/venv`
-- `/var/ossec/var/misp_worker/venv/bin/pip install -U pip`
-- `/var/ossec/var/misp_worker/venv/bin/pip install requests redis pyyaml`
-
-Copy worker:
-
-- `install -m 0750 worker/misp_worker.py /var/ossec/integrations/misp_worker.py`
+```bash
+sudo mkdir -p /var/ossec/var/misp_worker
+sudo python3 -m venv /var/ossec/var/misp_worker/venv
+sudo /var/ossec/var/misp_worker/venv/bin/pip install -U pip
+sudo /var/ossec/var/misp_worker/venv/bin/pip install requests redis pyyaml
+sudo install -o root -g wazuh -m 0750 \
+  worker/src/misp_worker.py \
+  /var/ossec/integrations/misp_worker.py
+```
 
 ## 4) Config
 
-Copy example env/config:
+Install the example environment and extractor configuration:
 
-- `cp config/misp_worker.env.example /var/ossec/etc/misp_worker.env`
-- `chmod 0640 /var/ossec/etc/misp_worker.env`
-- Edit values:
-  - `MISP_BASE_URL` must point to `.../attributes/restSearch`
-  - `MISP_API_KEY`
-  - TLS verify (`MISP_VERIFY`)
+```bash
+sudo install -o root -g wazuh -m 0640 \
+  config/misp_worker.env.example \
+  /var/ossec/etc/misp_worker.env
+sudo install -o root -g wazuh -m 0640 \
+  config/misp_extractors.yml.example \
+  /var/ossec/etc/misp_extractors.yml
+sudo $EDITOR /var/ossec/etc/misp_worker.env
+```
 
-Optional (extractors override):
-- `cp config/misp_extractors.yml.example /var/ossec/etc/misp_extractors.yml`
+Set these values:
+
+- `MISP_BASE_URL` to the MISP instance base URL, for example
+  `https://misp.example.local`. Do not append `/attributes/restSearch`; the
+  worker appends it.
+- `MISP_API_KEY` to a MISP automation key.
+- `MISP_VERIFY` to a trusted CA bundle. Use `0` only for isolated testing.
+
+The extractor file is optional because the worker has built-in defaults. Those
+defaults include Falco connection fields;
+the example demonstrates how to add other site-specific paths.
 
 ## 5) Wazuh integration entry
 
-In `/var/ossec/etc/ossec.conf` add:
+Install the rules emitted by the worker:
+
+```bash
+sudo install -o wazuh -g wazuh -m 0660 \
+  rules/local_rules.xml \
+  /var/ossec/etc/rules/misp.xml
+```
+
+In `/var/ossec/etc/ossec.conf`, add:
 
 ```xml
 <integration>
   <name>custom-misp-forwarder</name>
-  <group>to_misp</group>
   <alert_format>json</alert_format>
 </integration>
 ```
 
-Restart manager:
+This sends every eligible Wazuh alert to the Redis stream. To restrict the
+integration, add `<group>to_misp</group>` and ensure each intended source rule
+belongs to that group. Worker v1.5 does not require or enforce `to_misp` itself.
 
-- `systemctl restart wazuh-manager`
+Restart the manager:
+
+```bash
+sudo systemctl restart wazuh-manager
+```
 
 ## 6) systemd service for the worker
 
-Install the unit file:
+Install the supplied unit, then enable and start the worker:
 
-- `cp systemd/wazuh-misp-worker.service /etc/systemd/system/wazuh-misp-worker.service`
-- Ensure `EnvironmentFile=/var/ossec/etc/misp_worker.env` is set inside the unit.
+```bash
+sudo install -o root -g root -m 0644 \
+  systemd/wazuh-misp-worker.service \
+  /etc/systemd/system/wazuh-misp-worker.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now wazuh-misp-worker
+sudo systemctl status wazuh-misp-worker --no-pager
+```
 
-Enable and start:
+`systemctl reload wazuh-misp-worker` sends SIGHUP and reloads only
+`misp_extractors.yml`. Restart the worker after changing the environment file,
+worker code, Python dependencies, or systemd unit.
 
-- `systemctl daemon-reload`
-- `systemctl enable --now wazuh-misp-worker`
-- `systemctl status wazuh-misp-worker`
-
-Reload worker after config change (SIGHUP):
-
-- `systemctl reload wazuh-misp-worker`
+Worker v1.5 preserves flat `misp_*` fields for Wazuh rules and places detailed
+source/match objects under `misp_context`. This avoids OpenSearch field mapping
+conflicts with generic keys such as `data.source`.
 
 ## 7) Verify pipeline
 
-1) Confirm Redis stream is receiving messages:
-- `redis-cli XLEN wazuh:misp:in`
-- `redis-cli XREVRANGE wazuh:misp:in + - COUNT 1`
+1. Confirm the Redis stream is receiving messages:
 
-2) Confirm worker is consuming:
-- `redis-cli XINFO GROUPS wazuh:misp:in`
-- `redis-cli XPENDING wazuh:misp:in misp`
+```bash
+redis-cli XLEN wazuh:misp:in
+redis-cli XREVRANGE wazuh:misp:in + - COUNT 1
+```
 
-3) Enable temporary tracing (optional):
-- set `TRACE=1` and `HEARTBEAT_SEC=10` in env
-- `systemctl restart wazuh-misp-worker`
-- tail logs: `/var/ossec/logs/misp_worker.log`
+2. Confirm the worker is consuming and acknowledging them:
+
+```bash
+redis-cli XINFO GROUPS wazuh:misp:in
+redis-cli XPENDING wazuh:misp:in misp
+```
+
+3. For temporary tracing, set `TRACE=1` and `HEARTBEAT_SEC=10` in
+   `/var/ossec/etc/misp_worker.env`, restart the worker, and inspect
+   `/var/ossec/logs/misp_worker.log`.
