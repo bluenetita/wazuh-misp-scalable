@@ -9,7 +9,7 @@
 #
 # -= Scalable MISP Integration :: Wazuh Worker =-
 # Github @bluenetita
-# Version: 1.6
+# Version: 1.7
 # License: AGPL v3.0 https://www.gnu.org/licenses/agpl-3.0.html
 #
 # Fixes vs 1.0:
@@ -46,11 +46,10 @@
 #   [FEAT-3] MISP circuit breaker.
 #            Consecutive MISP errors across all worker threads are counted in a shared
 #            thread-safe counter. Once CB_OPEN_THRESHOLD is reached the circuit opens:
-#            worker threads skip MISP queries entirely and mark observables as unmatched
-#            so the stream keeps draining instead of stalling under timeout pressure.
-#            After CB_RESET_SEC seconds the circuit half-opens and exactly one probe
-#            thread is allowed through. On success the circuit closes and the counter
-#            resets. On failure it reopens for another CB_RESET_SEC.
+#            worker threads skip MISP queries and leave the affected messages pending.
+#            After CB_RESET_SEC seconds the circuit half-opens and exactly one probe is
+#            allowed through. On success the circuit closes and pending work is reclaimed;
+#            on failure it reopens for another CB_RESET_SEC.
 #            Set CB_OPEN_THRESHOLD=0 to disable the circuit breaker entirely.
 #
 #   [FEAT-4] Graceful HTTP session cleanup on shutdown.
@@ -88,6 +87,10 @@
 #           and acknowledge them only after a successful DLQ write.
 #   [BUG-10] Advance the XAUTOCLAIM cursor during pending-message recovery.
 #   [BUG-11] Enforce one bounded half-open circuit-breaker probe.
+#
+# Changes vs 1.6:
+#   [POLICY-1] Leave messages pending while the circuit breaker prevents a MISP
+#              query, then reclaim them when the breaker is ready to recover.
 
 
 import copy
@@ -147,7 +150,7 @@ WAZUH_QUEUE      = os.getenv("WAZUH_QUEUE", "/var/ossec/queue/sockets/queue")
 
 ACK_ON_MISP_ERROR        = os.getenv("ACK_ON_MISP_ERROR", "1") in ("1", "true", "True")
 PROCESS_PENDING_ON_START = os.getenv("PROCESS_PENDING_ON_START", "1") in ("1", "true", "True")
-AUTOCLAIM_LOOP           = os.getenv("AUTOCLAIM_LOOP", "0") in ("1", "true", "True")
+AUTOCLAIM_LOOP           = os.getenv("AUTOCLAIM_LOOP", "1") in ("1", "true", "True")
 AUTOCLAIM_IDLE_MS        = int(os.getenv("AUTOCLAIM_IDLE_MS", "60000"))
 AUTOCLAIM_COUNT          = int(os.getenv("AUTOCLAIM_COUNT", "200"))
 
@@ -213,8 +216,8 @@ class CircuitBreaker:
 
     CLOSED   : Normal operation. Consecutive error counter increments per MISP failure.
                Trips to OPEN when counter >= threshold.
-    OPEN     : MISP queries are skipped entirely. Worker acks messages and marks
-               observables as unmatched so the stream keeps draining.
+    OPEN     : MISP queries are skipped entirely. Messages remain pending without
+               consuming a DLQ retry or being classified as unmatched.
                Transitions to HALF_OPEN after reset_sec seconds.
     HALF_OPEN: Exactly one probe thread is allowed through (one bounded permit).
                Success -> CLOSED + counter reset.
@@ -251,6 +254,17 @@ class CircuitBreaker:
                 logger.info("CircuitBreaker half-open -- probing MISP")
             is_probe = self._probe_sem.acquire(blocking=False)
             return is_probe, is_probe
+
+    def recovery_ready(self) -> bool:
+        """Return whether pending work may be reclaimed without circuit churn."""
+        if not self.enabled:
+            return True
+        with self._lock:
+            if self._state == self.CLOSED:
+                return True
+            if self._state == self.HALF_OPEN:
+                return False
+            return time.time() - self._opened_at >= self._reset_sec
 
     def release_probe(self):
         self._probe_sem.release()
@@ -910,8 +924,10 @@ def process_message(
 
         query_allowed, is_probe = circuit_breaker.admit_query()
         if not query_allowed:
-            unmatched.append(o)
-            continue
+            if TRACE:
+                logger.info("TRACE msg=%s pending while circuit unavailable", msg_id)
+            return (0, len(observables), len(matched), len(unmatched),
+                    misp_queries, misp_errors, 0, 0)
 
         if is_probe:
             if TRACE:
@@ -1147,21 +1163,22 @@ def main():
                 logger.warning("stream trim failed: %s", e)
             last_trim = now
 
-        # Optional periodic autoclaim (OFF by default)
+        # Periodic pending recovery waits until the circuit can accept work.
         if AUTOCLAIM_LOOP and (now - last_claim > 30):
-            free_slots = QUEUE_MAX - q.qsize()
-            if free_slots > 0:
-                claim_cursor, reclaimed = xautoclaim(
-                    r,
-                    min_idle_ms=AUTOCLAIM_IDLE_MS,
-                    start_id=claim_cursor,
-                    count=min(AUTOCLAIM_COUNT, free_slots),
-                )
-                for msg_id, fields in reclaimed:
-                    try:
-                        q.put((msg_id, fields), timeout=0.2)
-                    except queue.Full:
-                        break
+            if circuit_breaker.recovery_ready():
+                free_slots = QUEUE_MAX - q.qsize()
+                if free_slots > 0:
+                    claim_cursor, reclaimed = xautoclaim(
+                        r,
+                        min_idle_ms=AUTOCLAIM_IDLE_MS,
+                        start_id=claim_cursor,
+                        count=min(AUTOCLAIM_COUNT, free_slots),
+                    )
+                    for msg_id, fields in reclaimed:
+                        try:
+                            q.put((msg_id, fields), timeout=0.2)
+                        except queue.Full:
+                            break
             last_claim = now
 
         # Backpressure: only read when queue has room

@@ -79,8 +79,26 @@ Optionally, you can extend/override extraction with `/var/ossec/etc/misp_extract
 - Missing, invalid, or non-object alert JSON is logged and explicitly acknowledged.
 - Unexpected processing exceptions are logged and left pending.
 - Startup recovery advances the `XAUTOCLAIM` cursor until Redis returns `0-0`.
-- While the circuit is open, the existing outage policy skips MISP and
-  acknowledges the message as unmatched. Half-open state admits one probe at a time.
+- While the circuit is open, MISP queries are skipped and affected messages remain
+  pending. They are not classified as unmatched and do not consume DLQ retries.
+- After `CB_RESET_SEC`, half-open state admits one probe. Periodic reclaim pauses while
+  the circuit cannot accept work and resumes in batches of at most `AUTOCLAIM_COUNT`
+  after recovery is possible.
+
+## Production outage planning
+
+- Keep `AUTOCLAIM_LOOP=1` for automatic recovery. If it is disabled, circuit-deferred
+  entries require a worker restart with `PROCESS_PENDING_ON_START=1` or manual reclaim.
+- Set `AUTOCLAIM_IDLE_MS` above the longest legitimate message-processing duration.
+  Reclaiming live work can produce duplicate delivery.
+- Size `STREAM_MAXLEN` above `peak alerts/second × maximum tolerated outage seconds`,
+  add a safety margin, and verify Redis memory use. Trimming can remove payloads that
+  are still pending if the retained stream is smaller than the outage backlog.
+- Expect at-least-once delivery: a crash after Wazuh output but before Redis ACK can
+  produce a duplicate. Consumers and alerting rules should tolerate duplicates.
+- Recovery can create a burst of MISP traffic. Tune `AUTOCLAIM_COUNT` and worker
+  concurrency to MISP capacity, and monitor heartbeat `pending`, `stream_len`, queue
+  depth, and `cb` state throughout outages and recovery.
 
 ## Observability
 

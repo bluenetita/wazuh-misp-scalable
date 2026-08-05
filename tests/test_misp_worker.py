@@ -211,7 +211,24 @@ class WorkerDeliveryTests(unittest.TestCase):
         self.assertEqual((False, False), breaker.admit_query())
         breaker.release_probe()
 
-    def test_open_circuit_preserves_skip_and_ack_policy(self):
+    def test_reclaim_waits_for_circuit_recovery(self):
+        breaker = worker.CircuitBreaker(threshold=1, reset_sec=60)
+        with mock.patch.object(worker.time, "time", return_value=100):
+            breaker.record_failure()
+
+        with mock.patch.object(worker.time, "time", return_value=159):
+            self.assertFalse(breaker.recovery_ready())
+
+        with mock.patch.object(worker.time, "time", return_value=160):
+            self.assertTrue(breaker.recovery_ready())
+            self.assertEqual((True, True), breaker.admit_query())
+            self.assertFalse(breaker.recovery_ready())
+
+        breaker.record_success()
+        breaker.release_probe()
+        self.assertTrue(breaker.recovery_ready())
+
+    def test_open_circuit_leaves_message_pending(self):
         redis_client = FakeRedis()
         breaker = worker.CircuitBreaker(threshold=1, reset_sec=60)
         breaker.record_failure()
@@ -223,11 +240,9 @@ class WorkerDeliveryTests(unittest.TestCase):
                 )
 
         misp_query.assert_not_called()
-        self.assertEqual((1, 1, 0, 1, 0, 0, 0, 0), counters)
-        self.assertEqual(
-            [(worker.STREAM, worker.GROUP, "1-0")],
-            redis_client.acknowledgements,
-        )
+        self.assertEqual((0, 1, 0, 0, 0, 0, 0, 0), counters)
+        self.assertEqual([], redis_client.acknowledgements)
+        self.assertNotIn(worker.k_retries("1-0"), redis_client.values)
 
     def test_unexpected_worker_error_does_not_ack(self):
         redis_client = FakeRedis()

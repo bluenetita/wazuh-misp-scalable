@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7 - 2026-08-05
+
+- Leave messages pending when the circuit breaker prevents a MISP query instead of
+  acknowledging them as unmatched or consuming a DLQ retry.
+- Enable periodic, circuit-aware pending recovery by default and retain its existing
+  idle-time and batch-size controls.
+- Document production sizing, duplicate-delivery, and outage-recovery guidance.
+
 ## 1.6 - 2026-08-05
 
 - Keep MISP failures pending until the configured DLQ retry threshold and

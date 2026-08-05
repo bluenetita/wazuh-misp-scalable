@@ -172,6 +172,13 @@ cannot collide with generic OpenSearch mappings such as `data.source`.
   - `TRACE=1`
   - `HEARTBEAT_SEC=10`
 
+### MISP outage recovery
+
+Circuit-denied messages remain pending instead of being acknowledged as unmatched.
+Keep `AUTOCLAIM_LOOP=1` so the worker reclaims them when MISP recovery can be probed.
+For production sizing, idle-time safety, duplicate-delivery expectations, and backlog
+monitoring, see `docs/ARCHITECTURE.md`.
+
 ## Verify it works
 
 ### Redis stream receives messages
