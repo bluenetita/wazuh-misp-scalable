@@ -138,9 +138,9 @@ sudo systemctl status wazuh-misp-worker --no-pager
 `misp_extractors.yml`. Restart the worker after changing the environment file,
 worker code, Python dependencies, or systemd unit.
 
-Worker v1.5 preserves flat `misp_*` fields for Wazuh rules and places detailed
-source/match objects under `misp_context`. This avoids OpenSearch field mapping
-conflicts with generic keys such as `data.source`.
+Worker v1.5 and later preserve flat `misp_*` fields for Wazuh rules and place
+detailed source/match objects under `misp_context`. This avoids OpenSearch field
+mapping conflicts with generic keys such as `data.source`.
 
 ## 7) Verify pipeline
 

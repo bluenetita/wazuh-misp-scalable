@@ -9,7 +9,7 @@
 #
 # -= Scalable MISP Integration :: Wazuh Worker =-
 # Github @bluenetita
-# Version: 1.5
+# Version: 1.6
 # License: AGPL v3.0 https://www.gnu.org/licenses/agpl-3.0.html
 #
 # Fixes vs 1.0:
@@ -82,6 +82,12 @@
 #           Wazuh daily index, causing OpenSearch to reject the whole alert when
 #           the worker later emits objects at those paths.
 #   [FEAT-5] Added Falco fd.sip/fd.cip decoded paths to the built-in IP extractor.
+#
+# Changes vs 1.5:
+#   [BUG-9] Preserve failed messages until their DLQ retry threshold is reached,
+#           and acknowledge them only after a successful DLQ write.
+#   [BUG-10] Advance the XAUTOCLAIM cursor during pending-message recovery.
+#   [BUG-11] Enforce one bounded half-open circuit-breaker probe.
 
 
 import copy
@@ -95,7 +101,7 @@ import logging
 import threading
 import queue
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import ipaddress
 import requests
@@ -210,7 +216,7 @@ class CircuitBreaker:
     OPEN     : MISP queries are skipped entirely. Worker acks messages and marks
                observables as unmatched so the stream keeps draining.
                Transitions to HALF_OPEN after reset_sec seconds.
-    HALF_OPEN: Exactly one probe thread is allowed through (Semaphore(1)).
+    HALF_OPEN: Exactly one probe thread is allowed through (one bounded permit).
                Success -> CLOSED + counter reset.
                Failure -> OPEN for another reset_sec.
     """
@@ -225,34 +231,29 @@ class CircuitBreaker:
         self._state      = self.CLOSED
         self._errors     = 0
         self._opened_at  = 0.0
-        self._probe_sem  = threading.Semaphore(1)
+        self._probe_sem  = threading.BoundedSemaphore(1)
 
     @property
     def enabled(self) -> bool:
         return self._threshold > 0
 
-    def is_open(self) -> bool:
-        """True when the circuit is fully open and queries must be skipped."""
+    def admit_query(self) -> Tuple[bool, bool]:
+        """Return whether a query may run and whether it owns the probe permit."""
         if not self.enabled:
-            return False
+            return True, False
         with self._lock:
+            if self._state == self.CLOSED:
+                return True, False
             if self._state == self.OPEN:
-                if time.time() - self._opened_at >= self._reset_sec:
-                    self._state = self.HALF_OPEN
-                    logger.info("CircuitBreaker half-open -- probing MISP")
-                    return False  # let one probe through
-                return True
-            return False
-
-    def allow_probe(self) -> bool:
-        """Acquire the probe slot (non-blocking). Returns False if taken."""
-        return self._probe_sem.acquire(blocking=False)
+                if time.time() - self._opened_at < self._reset_sec:
+                    return False, False
+                self._state = self.HALF_OPEN
+                logger.info("CircuitBreaker half-open -- probing MISP")
+            is_probe = self._probe_sem.acquire(blocking=False)
+            return is_probe, is_probe
 
     def release_probe(self):
-        try:
-            self._probe_sem.release()
-        except ValueError:
-            pass
+        self._probe_sem.release()
 
     def record_success(self):
         if not self.enabled:
@@ -263,7 +264,6 @@ class CircuitBreaker:
             self._state  = self.CLOSED
         if prev != self.CLOSED:
             logger.info("CircuitBreaker closed -- MISP is reachable again")
-        self.release_probe()
 
     def record_failure(self):
         if not self.enabled:
@@ -274,7 +274,6 @@ class CircuitBreaker:
                 self._state     = self.OPEN
                 self._opened_at = time.time()
                 logger.warning("CircuitBreaker reopened after failed probe")
-                self.release_probe()
             elif self._state == self.CLOSED and self._errors >= self._threshold:
                 self._state     = self.OPEN
                 self._opened_at = time.time()
@@ -712,13 +711,43 @@ def ensure_group(r: redis.Redis) -> None:
         pass
 
 
-def xautoclaim(r: redis.Redis, min_idle_ms: int, count: int = 200) -> List[Tuple[str, Dict[str, str]]]:
+def xautoclaim(
+    r: redis.Redis,
+    min_idle_ms: int,
+    start_id: str = "0-0",
+    count: int = 200,
+) -> Tuple[str, List[Tuple[str, Dict[str, str]]]]:
     try:
-        res  = r.execute_command("XAUTOCLAIM", STREAM, GROUP, CONSUMER, min_idle_ms, "0-0", "COUNT", count)
-        msgs = res[1] if isinstance(res, (list, tuple)) and len(res) >= 2 else []
-        return [(mid, flds) for mid, flds in msgs if isinstance(flds, dict)]
-    except Exception:
-        return []
+        claim_response = r.execute_command(
+            "XAUTOCLAIM", STREAM, GROUP, CONSUMER,
+            min_idle_ms, start_id, "COUNT", count,
+        )
+    except redis.exceptions.RedisError as error:
+        logger.warning("XAUTOCLAIM failed: %s", error)
+        return "0-0", []
+    if not isinstance(claim_response, (list, tuple)) or len(claim_response) < 2:
+        logger.warning("XAUTOCLAIM returned an unexpected response")
+        return "0-0", []
+    next_start_id = str(claim_response[0])
+    messages = claim_response[1] if isinstance(claim_response[1], (list, tuple)) else []
+    return next_start_id, [
+        (message_id, fields)
+        for message_id, fields in messages
+        if isinstance(fields, dict)
+    ]
+
+
+def xautoclaim_scan(
+    r: redis.Redis,
+    min_idle_ms: int,
+    count: int,
+) -> Iterator[Tuple[str, Dict[str, str]]]:
+    start_id = "0-0"
+    while True:
+        start_id, messages = xautoclaim(r, min_idle_ms, start_id, count)
+        yield from messages
+        if start_id == "0-0":
+            return
 
 
 def get_group_status(r: redis.Redis) -> Tuple[Optional[str], Optional[int], Optional[int]]:
@@ -743,30 +772,26 @@ def get_group_status(r: redis.Redis) -> Tuple[Optional[str], Optional[int], Opti
     return ldid, stream_len, pending
 
 
-def dlq_send(r: redis.Redis, msg_id: str, fields: Dict[str, str], reason: str, retries: int) -> None:
-    """[FEAT-2] Write a permanently failed message to the dead-letter stream."""
-    try:
-        dlq_fields = dict(fields)
-        dlq_fields.update({
-            "dlq_reason":  reason,
-            "dlq_retries": str(retries),
-            "dlq_ts":      str(int(time.time())),
-            "dlq_src_id":  msg_id,
-        })
-        r.xadd(DLQ_STREAM, dlq_fields)
-        logger.warning("DLQ msg_id=%s retries=%d -> %s reason=%s",
-                       msg_id, retries, DLQ_STREAM, reason)
-    except Exception as e:
-        logger.error("DLQ write failed stream=%s err=%s", DLQ_STREAM, str(e))
-    # Always ack to keep the PEL clean, even if the DLQ write failed.
-    try:
-        r.xack(STREAM, GROUP, msg_id)
-    except Exception:
-        pass
+def ack_message(r: redis.Redis, msg_id: str) -> None:
+    r.xack(STREAM, GROUP, msg_id)
     try:
         r.delete(k_retries(msg_id))
-    except Exception:
-        pass
+    except redis.exceptions.RedisError as error:
+        logger.warning("Retry cleanup failed msg_id=%s err=%s", msg_id, error)
+
+
+def dlq_send(r: redis.Redis, msg_id: str, fields: Dict[str, str], reason: str, retries: int) -> None:
+    """[FEAT-2] Write a permanently failed message to the dead-letter stream."""
+    dlq_fields = dict(fields)
+    dlq_fields.update({
+        "dlq_reason":  reason,
+        "dlq_retries": str(retries),
+        "dlq_ts":      str(int(time.time())),
+        "dlq_src_id":  msg_id,
+    })
+    r.xadd(DLQ_STREAM, dlq_fields)
+    logger.warning("DLQ msg_id=%s retries=%d -> %s reason=%s",
+                   msg_id, retries, DLQ_STREAM, reason)
 
 
 # -----------------------------------------------------------------------
@@ -821,24 +846,31 @@ def process_message(
     """
     raw = fields.get("alert")
     if not raw:
-        r.xack(STREAM, GROUP, msg_id)
-        return (1, 0, 0, 0, 0, 0, 0, 0)
+        logger.warning("Dropping message without alert field msg_id=%s", msg_id)
+        ack_message(r, msg_id)
+        return (1, 0, 0, 0, 0, 0, 1, 0)
 
     try:
         alert = json.loads(raw)
-    except Exception:
-        r.xack(STREAM, GROUP, msg_id)
-        return (1, 0, 0, 0, 0, 0, 0, 0)
+    except json.JSONDecodeError as error:
+        logger.warning("Dropping invalid alert JSON msg_id=%s err=%s", msg_id, error)
+        ack_message(r, msg_id)
+        return (1, 0, 0, 0, 0, 0, 1, 0)
+    if not isinstance(alert, dict):
+        logger.warning("Dropping non-object alert JSON msg_id=%s", msg_id)
+        ack_message(r, msg_id)
+        return (1, 0, 0, 0, 0, 0, 1, 0)
 
     agent     = alert.get("agent") if isinstance(alert.get("agent"), dict) else None
-    rule_desc = str((alert.get("rule", {}) or {}).get("description", ""))
+    rule      = alert.get("rule") if isinstance(alert.get("rule"), dict) else {}
+    rule_desc = str(rule.get("description", ""))
 
     observables = extract_observables(alert, cfg)
     if TRACE:
         logger.info("TRACE msg=%s observables=%d %s", msg_id, len(observables), observables)
 
     if not observables:
-        r.xack(STREAM, GROUP, msg_id)
+        ack_message(r, msg_id)
         return (1, 0, 0, 0, 0, 0, 0, 0)
 
     matched: List[Dict[str, Any]]   = []
@@ -849,9 +881,15 @@ def process_message(
     for o in observables:
         # Short-window per-observable deduplication
         try:
-            if not r.set(k_dedupe(o), "1", nx=True, ex=DEDUP_TTL):
+            dedupe_key = k_dedupe(o)
+            if (
+                not r.set(dedupe_key, msg_id, nx=True, ex=DEDUP_TTL)
+                and r.get(dedupe_key) != msg_id
+                and r.get(k_retries(msg_id)) is None
+            ):
                 continue
-        except Exception:
+        except redis.exceptions.RedisError as error:
+            logger.warning("Dedupe unavailable msg_id=%s err=%s", msg_id, error)
             continue
 
         ck     = k_cache(o)
@@ -871,18 +909,12 @@ def process_message(
             except Exception:
                 pass  # corrupted cache entry -- fall through to live query
 
-        # [FEAT-3] Circuit breaker: skip query when circuit is open
-        if circuit_breaker.is_open():
+        query_allowed, is_probe = circuit_breaker.admit_query()
+        if not query_allowed:
             unmatched.append(o)
             continue
 
-        is_probe = False
-        if circuit_breaker.state == CircuitBreaker.HALF_OPEN:
-            if not circuit_breaker.allow_probe():
-                # Another thread holds the probe slot
-                unmatched.append(o)
-                continue
-            is_probe = True
+        if is_probe:
             if TRACE:
                 logger.info("TRACE msg=%s cb=half_open probing %s:%s",
                             msg_id, o["type"], o["value"])
@@ -905,18 +937,29 @@ def process_message(
                 try:
                     retries = int(r.incr(rk))
                     r.expire(rk, DLQ_RETRY_TTL_SEC)
-                except Exception:
+                except redis.exceptions.RedisError as retry_error:
+                    logger.error("Retry tracking failed msg_id=%s err=%s", msg_id, retry_error)
                     retries = 1
 
                 if retries >= DLQ_MAX_RETRIES:
-                    dlq_send(r, msg_id, fields, reason=str(e), retries=retries)
-                    return (1, len(observables), len(matched), len(unmatched),
-                            misp_queries, misp_errors, 0, 1)
-
-                logger.info("MISP error msg_id=%s retry=%d/%d", msg_id, retries, DLQ_MAX_RETRIES)
+                    try:
+                        dlq_send(r, msg_id, fields, reason=str(e), retries=retries)
+                    except redis.exceptions.RedisError as dlq_error:
+                        logger.error("DLQ write failed stream=%s err=%s", DLQ_STREAM, dlq_error)
+                    else:
+                        ack_message(r, msg_id)
+                        return (1, len(observables), len(matched), len(unmatched),
+                                misp_queries, misp_errors, 0, 1)
+                else:
+                    logger.info("MISP error msg_id=%s retry=%d/%d",
+                                msg_id, retries, DLQ_MAX_RETRIES)
+                if TRACE:
+                    logger.info("TRACE msg=%s pending for DLQ retry", msg_id)
+                return (0, len(observables), len(matched), len(unmatched),
+                        misp_queries, misp_errors, 0, 0)
 
             if ACK_ON_MISP_ERROR:
-                r.xack(STREAM, GROUP, msg_id)
+                ack_message(r, msg_id)
                 if TRACE:
                     logger.info("TRACE msg=%s ack_on_misp_error=1", msg_id)
                 return (1, len(observables), len(matched), len(unmatched),
@@ -927,6 +970,9 @@ def process_message(
                 # processed=0: message was intentionally not acked and will be re-delivered
                 return (0, len(observables), len(matched), len(unmatched),
                         misp_queries, misp_errors, 0, 0)
+        finally:
+            if is_probe:
+                circuit_breaker.release_probe()
 
         if not attrs:
             try:
@@ -942,12 +988,6 @@ def process_message(
         except Exception:
             pass
         matched.append({"observable": o, "misp": slim})
-
-        if is_probe:
-            try:
-                r.delete(k_retries(msg_id))
-            except Exception:
-                pass
 
     if TRACE:
         logger.info("TRACE msg=%s matched=%d unmatched=%d misp_q=%d misp_err=%d cb=%s",
@@ -979,7 +1019,7 @@ def process_message(
             },
         }, agent)
 
-    r.xack(STREAM, GROUP, msg_id)
+    ack_message(r, msg_id)
     return (1, len(observables), len(matched), len(unmatched), misp_queries, misp_errors, 0, 0)
 
 
@@ -1008,12 +1048,8 @@ def worker_loop(name: str, q: queue.Queue, r: redis.Redis,
                 dlq          = res[7],
             )
         except Exception as e:
-            counters.add(processed=1, exceptions=1)
+            counters.add(exceptions=1)
             logger.error("Thread %s error msg_id=%s err=%s", name, msg_id, str(e))
-            try:
-                r.xack(STREAM, GROUP, msg_id)
-            except Exception:
-                pass
         finally:
             q.task_done()
     # [FEAT-4] Properly close the thread-local HTTP session on shutdown
@@ -1063,24 +1099,21 @@ def main():
     # Reclaim any in-flight messages from a previous process instance
     if PROCESS_PENDING_ON_START:
         reclaimed_total = 0
-        while True:
-            reclaimed = xautoclaim(r, min_idle_ms=0, count=500)
-            if not reclaimed:
-                break
-            for msg_id, fields in reclaimed:
-                while not stop_evt.is_set():
-                    try:
-                        q.put((msg_id, fields), timeout=0.5)
-                        reclaimed_total += 1
-                        break
-                    except queue.Full:
-                        continue
+        for msg_id, fields in xautoclaim_scan(r, min_idle_ms=0, count=500):
+            while not stop_evt.is_set():
+                try:
+                    q.put((msg_id, fields), timeout=0.5)
+                    reclaimed_total += 1
+                    break
+                except queue.Full:
+                    continue
         if reclaimed_total:
             logger.info("Reclaimed pending on start: %d", reclaimed_total)
 
     last_hb    = time.time()
     last_claim = time.time()
     last_trim  = time.time()
+    claim_cursor = "0-0"
 
     while not stop_evt.is_set():
         # Reload extractors on SIGHUP
@@ -1119,8 +1152,13 @@ def main():
         if AUTOCLAIM_LOOP and (now - last_claim > 30):
             free_slots = QUEUE_MAX - q.qsize()
             if free_slots > 0:
-                for msg_id, fields in xautoclaim(r, min_idle_ms=AUTOCLAIM_IDLE_MS,
-                                                 count=min(AUTOCLAIM_COUNT, free_slots)):
+                claim_cursor, reclaimed = xautoclaim(
+                    r,
+                    min_idle_ms=AUTOCLAIM_IDLE_MS,
+                    start_id=claim_cursor,
+                    count=min(AUTOCLAIM_COUNT, free_slots),
+                )
+                for msg_id, fields in reclaimed:
                     try:
                         q.put((msg_id, fields), timeout=0.2)
                     except queue.Full:

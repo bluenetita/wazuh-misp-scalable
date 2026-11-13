@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6 - 2026-08-05
+
+- Keep MISP failures pending until the configured DLQ retry threshold and
+  acknowledge the source only after a successful DLQ write.
+- Allow retries of the same stream message through short-window deduplication.
+- Complete one cursor-based pending scan during startup recovery.
+- Limit circuit-breaker half-open state to one probe at a time.
+- Add focused regression tests for delivery-state behavior.
+
 ## 1.5 - 2026-08-05
 
 - Namespace detailed enrichment data under `misp_context` to prevent
