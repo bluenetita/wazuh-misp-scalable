@@ -144,6 +144,33 @@ class WorkerDeliveryTests(unittest.TestCase):
         self.assertEqual(2, misp_query.call_count)
         self.assertEqual([], redis_client.acknowledgements)
 
+    def test_failed_retry_bypasses_another_messages_dedupe_key(self):
+        redis_client = FakeRedis()
+        dedupe_key = worker.k_dedupe({"type": "fqdn", "value": "example.com"})
+        with mock.patch.object(
+            worker, "misp_query_value", side_effect=RuntimeError("MISP down")
+        ) as misp_query:
+            first = worker.process_message(
+                redis_client, self.extractor_config(), "1-0", self.alert_fields()
+            )
+            redis_client.delete(dedupe_key)
+            redis_client.set(dedupe_key, "2-0", nx=True, ex=worker.DEDUP_TTL)
+            retry = worker.process_message(
+                redis_client, self.extractor_config(), "1-0", self.alert_fields()
+            )
+            fresh = worker.process_message(
+                redis_client, self.extractor_config(), "3-0", self.alert_fields()
+            )
+
+        self.assertEqual(0, first[0])
+        self.assertEqual(0, retry[0])
+        self.assertEqual(2, misp_query.call_count)
+        self.assertEqual(2, redis_client.values[worker.k_retries("1-0")])
+        self.assertEqual(1, fresh[0])
+        self.assertEqual(
+            [(worker.STREAM, worker.GROUP, "3-0")], redis_client.acknowledgements
+        )
+
     def test_failed_dlq_write_leaves_source_pending(self):
         redis_client = FakeRedis()
         redis_client.fail_dlq = True

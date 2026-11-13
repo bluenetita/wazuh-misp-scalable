@@ -899,6 +899,7 @@ def process_message(
             if (
                 not r.set(dedupe_key, msg_id, nx=True, ex=DEDUP_TTL)
                 and r.get(dedupe_key) != msg_id
+                and r.get(k_retries(msg_id)) is None
             ):
                 continue
         except redis.exceptions.RedisError as error:
