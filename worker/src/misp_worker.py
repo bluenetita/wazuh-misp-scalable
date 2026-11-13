@@ -854,6 +854,7 @@ def process_message(
     cfg: Dict[str, Any],
     msg_id: str,
     fields: Dict[str, str],
+    is_reclaimed: bool = False,
 ) -> Tuple[int, int, int, int, int, int, int, int]:
     """
     Returns: (processed, observables, matched, unmatched, misp_queries, misp_errors, exceptions, dlq)
@@ -893,11 +894,12 @@ def process_message(
     session = get_session()
 
     for o in observables:
-        # Short-window per-observable deduplication
+        # Reclaimed deliveries must bypass short-window deduplication.
         try:
             dedupe_key = k_dedupe(o)
             if (
-                not r.set(dedupe_key, msg_id, nx=True, ex=DEDUP_TTL)
+                not is_reclaimed
+                and not r.set(dedupe_key, msg_id, nx=True, ex=DEDUP_TTL)
                 and r.get(dedupe_key) != msg_id
                 and r.get(k_retries(msg_id)) is None
             ):
@@ -1050,9 +1052,9 @@ def worker_loop(name: str, q: queue.Queue, r: redis.Redis,
             item = q.get(timeout=0.5)
         except queue.Empty:
             continue
-        msg_id, fields = item
+        msg_id, fields, is_reclaimed = item
         try:
-            res = process_message(r, cfg_ref["cfg"], msg_id, fields)
+            res = process_message(r, cfg_ref["cfg"], msg_id, fields, is_reclaimed)
             counters.add(
                 processed    = res[0],
                 observables  = res[1],
@@ -1118,7 +1120,7 @@ def main():
         for msg_id, fields in xautoclaim_scan(r, min_idle_ms=0, count=500):
             while not stop_evt.is_set():
                 try:
-                    q.put((msg_id, fields), timeout=0.5)
+                    q.put((msg_id, fields, True), timeout=0.5)
                     reclaimed_total += 1
                     break
                 except queue.Full:
@@ -1177,7 +1179,7 @@ def main():
                     )
                     for msg_id, fields in reclaimed:
                         try:
-                            q.put((msg_id, fields), timeout=0.2)
+                            q.put((msg_id, fields, True), timeout=0.2)
                         except queue.Full:
                             break
             last_claim = now
@@ -1197,7 +1199,7 @@ def main():
         for msg_id, fields in messages:
             while not stop_evt.is_set():
                 try:
-                    q.put((msg_id, fields), timeout=0.5)
+                    q.put((msg_id, fields, False), timeout=0.5)
                     break
                 except queue.Full:
                     continue

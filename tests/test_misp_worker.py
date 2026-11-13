@@ -271,10 +271,41 @@ class WorkerDeliveryTests(unittest.TestCase):
         self.assertEqual([], redis_client.acknowledgements)
         self.assertNotIn(worker.k_retries("1-0"), redis_client.values)
 
+    def test_circuit_deferred_retry_bypasses_another_messages_dedupe_key(self):
+        redis_client = FakeRedis()
+        breaker = worker.CircuitBreaker(threshold=1, reset_sec=60)
+        breaker.record_failure()
+        counters = worker.Counters()
+        message_queue = queue.Queue()
+        dedupe_key = worker.k_dedupe({"type": "fqdn", "value": "example.com"})
+
+        with mock.patch.object(worker, "circuit_breaker", breaker):
+            with mock.patch.object(worker, "misp_query_value", return_value=[]) as misp_query:
+                deferred = worker.process_message(
+                    redis_client, self.extractor_config(), "1-0", self.alert_fields()
+                )
+                redis_client.delete(dedupe_key)
+                redis_client.set(dedupe_key, "2-0", nx=True, ex=worker.DEDUP_TTL)
+                breaker.record_success()
+                message_queue.put(("1-0", self.alert_fields(), True))
+                worker.stop_evt.set()
+                worker.worker_loop(
+                    "test", message_queue, redis_client,
+                    {"cfg": self.extractor_config()}, counters,
+                )
+
+        self.assertEqual(0, deferred[0])
+        self.assertEqual(1, misp_query.call_count)
+        self.assertEqual((1, 1, 0, 1, 1, 0, 0, 0), counters.snapshot_and_reset())
+        self.assertEqual(
+            [(worker.STREAM, worker.GROUP, "1-0")], redis_client.acknowledgements
+        )
+        self.assertNotIn(worker.k_retries("1-0"), redis_client.values)
+
     def test_unexpected_worker_error_does_not_ack(self):
         redis_client = FakeRedis()
         message_queue = queue.Queue()
-        message_queue.put(("1-0", self.alert_fields()))
+        message_queue.put(("1-0", self.alert_fields(), False))
         counters = worker.Counters()
         worker.stop_evt.set()
 
